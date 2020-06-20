@@ -1,0 +1,2 @@
+# Natural_Language_Processing_Sentiment_Analysis
+The data were scraped from two sites. The API for the websites Genius.com and Spotify were used to access lyrics for every song as well as associated metadata. A Python script was developed utilizing the lyricGenius API wrapper as well as other methods to access Spotify data. The result was a dataset comprised of 131 unstructured song lyrics and metadata for each. The dataset obtained from the Python script was imported into R for text mining and analysis.
