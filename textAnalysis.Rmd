@@ -1,0 +1,407 @@
+---
+title: "Unstructured Data and Sentiment Analysis of Aesop Rock Lyrics"
+author: "Marc Petta"
+date: 
+output:
+  html_document: default
+  word_document: default
+---
+ 
+```{r, message=FALSE}
+# set up
+library(dplyr) 
+library(tidytext)
+library(tidyr)
+library(igraph)
+library(ggraph)
+library(wesanderson)
+library(ggplot2) 
+library(ggrepel)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(formattable)
+library(yarrr)
+
+# assign object to Wes Anderson film inspired color palletes
+my_colors <- wes_palette("Cavalcanti1")
+
+# set up output formatting
+my_kable_styling <- function(dat, caption) {
+  kable(dat, "html", escape = FALSE, caption = caption) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed", "bordered"),
+                full_width = FALSE)
+}
+
+# load data
+aesop <- read.csv("aesop_final_analysis.csv", stringsAsFactors = FALSE, row.names = 1)
+# remove duplicate column
+aesop <- aesop[-5]
+glimpse(aesop)
+
+```
+
+## Data Preprocessing and Feature Engineering
+
+```{r}
+# create the decade column
+aesop <- aesop %>%
+  mutate(decade = 
+           ifelse(aesop$Release.Date %in% 1990:1999, "1990-99", 
+           ifelse(aesop$Release.Date %in% 2000:2005, "2000-05", 
+           ifelse(aesop$Release.Date %in% 2006:2009, "2006-09", 
+           ifelse(aesop$Release.Date %in% 2010:2015, "2010-15", 
+           ifelse(aesop$Release.Date %in% 2016:2019, "2016-19", 
+                  "NA"))))))
+
+# function to expand contractions in an English-language source
+fix.contractions <- function(doc) {
+  # "won't" is a special case as it does not expand to "wo not"
+  doc <- gsub("won't", "will not", doc)
+  doc <- gsub("can't", "can not", doc)
+  doc <- gsub("n't", " not", doc)
+  doc <- gsub("'ll", " will", doc)
+  doc <- gsub("'re", " are", doc)
+  doc <- gsub("'ve", " have", doc)
+  doc <- gsub("'m", " am", doc)
+  doc <- gsub("'d", " would", doc)
+  # 's could be 'is' or could be possessive: it has no expansion
+  doc <- gsub("'s", "", doc)
+  return(doc)
+}
+
+# expand contractions
+aesop$Lyrics <- sapply(aesop$Lyrics, fix.contractions)
+
+# function to remove special characters
+removeSpecialChars <- function(x) gsub("[^a-zA-Z0-9 ]", " ", x)
+# remove special characters
+aesop$Lyrics <- sapply(aesop$Lyrics, removeSpecialChars)
+
+# convert everything to lower case
+aesop$Lyrics <- sapply(aesop$Lyrics, tolower)
+
+# create an object with a list of the words we know we want to remove
+undesirable_words <- c("Verse", "Intro", "Sample", "Chorus", "Aesop", "Hook", "Kimya", "Dawson", "Various", "Samples", "KRS-One", "Introduction")
+
+# create tidy text format: Unnested, Unsummarized, -Undesirables, Stop and Short words
+aesop_tidy <- aesop %>%
+  unnest_tokens(word, Lyrics) %>% # break the lyrics into individual words
+  filter(!word %in% undesirable_words) %>% # remove undesirables like "ah" or "oo"
+  filter(!nchar(word) < 3) %>% 
+  anti_join(stop_words) 
+
+aesop_bg <- aesop %>%
+  filter(!Lyrics %in% undesirable_words) #%>% #Remove undesirables
+  #filter(!nchar(Lyrics) < 3) %>% #Words like "ah" or "oo" used in music
+  #anti_join(stop_words) #Data provided by the tidytext package
+
+```
+
+## Visualizations
+Take a look at the distribution of songs over the years 
+```{r}
+# write a higher res png 
+png("aesop.png", width = 4, height = 4, units = 'in', res = 300)
+
+aesop %>%
+  group_by(decade) %>%
+  summarise(number_of_songs = n()) %>%
+  ggplot() + 
+  geom_bar(aes(x = decade, y = number_of_songs), stat = "identity", fill="steelblue")  +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.title = element_blank(),
+        panel.grid.minor = element_blank()) +
+  ggtitle("Released Songs") +
+  labs(x = NULL, y = "Song Count")
+
+dev.off()
+
+```
+
+
+```{r}
+
+word_summary <- aesop_tidy %>%
+  mutate(decade = ifelse(is.na(decade),"NONE", decade)) %>%
+  group_by(decade, Song.Title) %>%
+  mutate(word_count = n_distinct(word)) %>%
+  select(Song.Title, Released = decade,  word_count) %>%
+  distinct() %>% # obtain one record per song
+  ungroup()
+
+pirateplot(formula =  word_count ~ Released , 
+   data = word_summary, 
+   xlab = NULL, ylab = "Song Distinct Word Count", 
+   main = "Lexical Diversity Per Decade", 
+   pal = "google", # color scheme
+   point.o = .2, # points
+   avg.line.o = 1, # turn on the Average/Mean line
+   theme = 0, # theme
+   point.pch = 16, # point `pch` type
+   point.cex = 1.5, # point size
+   jitter.val = .1, # turn on jitter 
+   cex.lab = .9, cex.names = .7) # axis label size
+
+
+```
+
+
+```{r}
+
+songs_year <- aesop %>%
+  select(Song.Title, Release.Date) %>%
+  group_by(Release.Date) %>%
+  summarise(song_count = n())
+
+id <- seq_len(nrow(songs_year))
+songs_year <- cbind(songs_year, id)
+label_data = songs_year
+number_of_bar = nrow(label_data) # calculate the ANGLE of the labels
+angle = 90 - 360 * (label_data$id - 0.5) / number_of_bar # center things
+label_data$hjust <- ifelse(angle < -90, 1, 0) # align label
+label_data$angle <- ifelse(angle < -90, angle + 180, angle) # flip angle
+ggplot(songs_year, aes(x = as.factor(id), y = song_count)) +
+  geom_bar(stat = "identity", fill = alpha("coral", 0.7)) +
+  geom_text(data = label_data, aes(x = id, y = song_count + 10, label = Release.Date, hjust = hjust), color = "black", alpha = 0.6, size = 3, angle =  label_data$angle, inherit.aes = FALSE ) +
+  coord_polar(start = 0) +
+  ylim(-20, 150) + # size of the circle
+  theme_minimal() +
+  theme(axis.text = element_blank(),
+        axis.title = element_blank(),
+        panel.grid = element_blank(),
+        plot.margin = unit(rep(-4,4), "in"),
+        plot.title = element_text(margin = margin(t = 10, b = -10)))
+
+
+```
+
+
+
+```{r}
+# load library and accept user agreement
+library(textdata)
+
+new_sentiments <- get_sentiments("afinn")
+
+names(new_sentiments)[names(new_sentiments) == 'value'] <- 'score'
+
+new_sentiments <- new_sentiments %>% mutate(lexicon = "afinn", sentiment = ifelse(score >= 0, "positive", "negative"), words_in_lexicon = n_distinct((word)))
+
+bing <- get_sentiments("bing") %>% 
+     mutate(lexicon = "bing", 
+            words_in_lexicon = n_distinct(word))    
+
+nrc <- get_sentiments("nrc") %>% 
+     mutate(lexicon = "nrc", 
+            words_in_lexicon = n_distinct(word))
+
+new_sentiments <- bind_rows(new_sentiments, bing, nrc)
+
+```
+
+
+```{r}
+
+new_sentiments %>%
+     group_by(lexicon, sentiment, words_in_lexicon) %>%
+     summarise(distinct_words = n_distinct(word)) %>%
+     ungroup() %>%
+     spread(sentiment, distinct_words) %>%
+     mutate(lexicon = color_tile("lightblue", "lightblue")(lexicon),
+            words_in_lexicon = color_bar("lightpink")(words_in_lexicon)) %>%
+     my_kable_styling(caption = "Word Counts per Lexicon")
+
+```
+
+
+```{r}
+
+aesop_bing <- aesop_tidy %>%
+  inner_join(get_sentiments("bing"))
+
+aesop_nrc <- aesop_tidy %>%
+  inner_join(get_sentiments("nrc"))
+
+aesop_nrc_sub <- aesop_tidy %>%
+  inner_join(get_sentiments("nrc")) %>%
+  filter(!sentiment %in% c("positive", "negative"))
+
+```
+
+```{r}
+
+nrc_plot <- aesop_nrc %>%
+  group_by(sentiment) %>%
+  summarise(word_count = n()) %>%
+  ungroup() %>%
+  mutate(sentiment = reorder(sentiment, word_count)) %>%
+  #Use `fill = -word_count` to make the larger bars darker
+  ggplot(aes(sentiment, word_count, fill = -word_count)) +
+  geom_col() +
+  guides(fill = FALSE) + #Turn off the legend
+  labs(x = NULL, y = "Word Count") +
+  scale_y_continuous(limits = c(0, 15000)) + #Hard code the axis limit
+  ggtitle("Aesop Rock NRC Sentiment") +
+  coord_flip()
+
+nrc_plot
+
+```
+
+
+```{r}
+
+bing_plot <- aesop_bing %>%
+  group_by(sentiment) %>%
+  summarise(word_count = n()) %>%
+  ungroup() %>%
+  mutate(sentiment = reorder(sentiment, word_count)) %>%
+  ggplot(aes(sentiment, word_count, fill = sentiment)) +
+  geom_col() +
+  guides(fill = FALSE) +
+  labs(x = NULL, y = "Word Count") +
+  scale_y_continuous(limits = c(0, 8000)) +
+  ggtitle("Prince Bing Sentiment") +
+  coord_flip()
+
+bing_plot
+
+```
+
+
+```{r, fig.height=3, fig.width=3}
+
+grid.col = c("1990-99" = my_colors[1], "2000-05" = my_colors[2], "2006-09" = my_colors[3], "2010-15" = my_colors[4], "2016-19" = my_colors[5], "anger" = "grey", "anticipation" = "grey", "disgust" = "grey", "fear" = "grey", "joy" = "grey", "sadness" = "grey", "surprise" = "grey", "trust" = "grey")
+
+decade_mood <-  aesop_nrc %>%
+  filter(decade != "NA" & !sentiment %in% c("positive", "negative")) %>%
+  count(sentiment, decade) %>%
+  group_by(decade, sentiment) %>%
+  summarise(sentiment_sum = sum(n)) %>%
+  ungroup()
+
+circos.clear()
+# set the gap size
+circos.par(gap.after = c(rep(5, length(unique(decade_mood[[1]])) - 1), 15,
+                         rep(5, length(unique(decade_mood[[2]])) - 1), 15))
+chordDiagram(decade_mood, grid.col = grid.col, transparency = .2)
+title("Relationship Between Mood and Decade")
+
+```
+
+
+```{r}
+
+aesop_bigrams <- aesop_bg %>%
+  unnest_tokens(bigram, Lyrics, token = "ngrams", n = 2)
+
+bigrams_separated <- aesop_bigrams %>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+
+bigrams_filtered <- bigrams_separated %>%
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word) %>%
+  filter(!word1 %in% undesirable_words) %>%
+  filter(!word2 %in% undesirable_words)
+
+# filter out the cases where the two words are the same
+bigram_decade <- bigrams_filtered %>%
+  filter(word1 != word2) %>%
+  filter(decade != "NA") %>%
+  unite(bigram, word1, word2, sep = " ") %>%
+  inner_join(aesop_bg) %>%
+  count(bigram, decade, sort = TRUE) %>%
+  group_by(decade) %>%
+  slice(seq_len(7)) %>%
+  ungroup() %>%
+  arrange(decade, n) %>%
+  mutate(row = row_number())
+
+```
+
+```{r}
+
+bigram_decade %>%
+  ggplot(aes(row, n, fill = decade)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~decade, scales = "free_y") +
+  xlab(NULL) + ylab(NULL) +
+  scale_x_continuous(  # handles replacement of row
+      breaks = bigram_decade$row, 
+      labels = bigram_decade$bigram) +
+  theme(panel.grid.major.x = element_blank()) +
+  ggtitle("Bigrams Per Decade") +
+  coord_flip()
+
+
+```
+
+
+```{r}
+
+AFINN <- get_sentiments("afinn")
+
+not_words <- bigrams_separated %>%
+  filter(word1 == "not") %>%
+  inner_join(AFINN, by = c(word2 = "word")) %>%
+  count(word2, value, sort = TRUE) %>%
+  ungroup()
+
+not_words %>%
+  mutate(contribution = n * value) %>%
+  arrange(desc(abs(contribution))) %>%
+  head(20) %>%
+  mutate(word2 = reorder(word2, contribution)) %>%
+  ggplot(aes(word2, n * value, fill = n * value > 0)) +
+  geom_col(show.legend = FALSE) +
+  xlab("Words preceded by \"not\"") +
+  ylab("Sentiment score * Number of Occurrences") +
+  ggtitle("Polar Sentiment of Words Preceded by Not") +
+  coord_flip()
+
+
+
+```
+
+
+
+```{r}
+
+negation_words <- c("not", "no", "never", "without")
+
+negation_bigrams <- bigrams_separated %>%
+  filter(word1 %in% negation_words) %>%
+  inner_join(AFINN, by = c(word2 = "word")) %>%
+  count(word1, word2, value, sort = TRUE) %>%
+  mutate(contribution = n * value) %>%
+  arrange(desc(abs(contribution))) %>%
+  group_by(word1) %>%
+  slice(seq_len(20)) %>%
+  arrange(word1,desc(contribution)) %>%
+  ungroup()
+
+bigram_graph <- negation_bigrams %>%
+  graph_from_data_frame() # from `igraph`
+
+set.seed(123)
+
+a <- grid::arrow(type = "closed", length = unit(.15, "inches"))
+
+ggraph(bigram_graph, layout = "fr") +
+  geom_edge_link(alpha = .25) +
+  geom_edge_density(aes(fill = value)) +
+  geom_node_point(color = "coral", size = 1) + 
+  geom_node_text(aes(label = name),  repel = TRUE) +
+  theme_void() + theme(legend.position = "none",
+                       plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Negation Bigram Network")
+
+
+```
+
+
+
+
+
+
